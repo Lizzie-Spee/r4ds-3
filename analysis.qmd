@@ -2,4 +2,125 @@
 title: "Analyzing School District Reading Scores"
 author: "Lizzie"
 format: html
+execute:
+  echo: false
 ---
+
+```{r}
+#| message: false
+library(tidyverse)
+library(DBI)
+library(duckdb)
+library(dbplyr)
+```
+
+```{r}
+#| message: false
+connection <- dbConnect(duckdb(), "data/seda_2025.duckdb", read_only = TRUE)
+dbplyr_dist <- tbl(connection, "district_scores")
+```
+
+```{r}
+#| cache: true
+#| cache.extra: !expr file.mtime("data/seda_2025.duckdb")
+#| message: false
+district_2015 <- dbplyr_dist |>
+  filter(year == 2015, !is.na(rla_score)) |>
+  select(district_id, district_name, state, score_2015 = rla_score)
+district_2023 <- dbplyr_dist |>
+  filter(year == 2023, !is.na(rla_score)) |>
+  select(district_id, district_name, state, score_2023 = rla_score)
+score_change <- inner_join(
+  district_2015,
+  district_2023,
+  by = c("district_id", "district_name", "state")
+) |>
+  mutate(score_change = score_2023 - score_2015) |>
+  select(district_id, district_name, state, score_change) |>
+  collect()
+dbplyr_state <- tbl(connection, "state_scores")
+state_2015 <- dbplyr_state |>
+  filter(year == 2015, !is.na(rla_score)) |>
+  select(stateabb, state_name, score_2015 = rla_score)
+state_2023 <- dbplyr_state |>
+  filter(year == 2023, !is.na(rla_score)) |>
+  select(stateabb, state_name, score_2023 = rla_score)
+state_change <- inner_join(
+  state_2015,
+  state_2023,
+  by = c("stateabb", "state_name")
+) |>
+  mutate(score_change = score_2023 - score_2015) |>
+  select(stateabb, state_name, score_change) |>
+  collect()
+print(state_change)
+```
+
+```{r}
+score_change |>
+  mutate(
+    rla_change = score_change,
+    direction = case_when(
+      rla_change > 0 ~ "Positive",
+      rla_change < 0 ~ "Negative",
+      TRUE ~ "No change"
+    )
+  ) |>
+  ggplot(aes(x = rla_change, fill = direction)) +
+  geom_histogram(bins = 30) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_fill_manual(
+    values = c("Negative" = "#d95f02", "No change" = "gray60", "Positive" = "#1b9e77")
+  ) +
+  labs(
+    title = "Distribution of District Reading Score Changes",
+    subtitle = paste("2015 to 2023 across", nrow(score_change), "districts"),
+    x = "Change in reading score",
+    y = "Number of districts",
+    fill = "Change",
+    caption = "Positive values indicate improvement; negative values indicate decline."
+  )
+```
+
+```{r}
+#| message: false
+#| fig-height: 12
+plot_connection <- dbConnect(
+  duckdb(),
+  "data/seda_2025.duckdb",
+  read_only = TRUE
+)
+dbplyr_state_plot <- tbl(plot_connection, "state_scores")
+state_plot_data <- inner_join(
+  dbplyr_state_plot |>
+    filter(year == 2015, !is.na(rla_score)) |>
+    select(stateabb, state_name, score_2015 = rla_score),
+  dbplyr_state_plot |>
+    filter(year == 2023, !is.na(rla_score)) |>
+    select(stateabb, state_name, score_2023 = rla_score),
+  by = c("stateabb", "state_name")
+) |>
+  collect() |>
+  mutate(
+    direction = if_else(score_2023 >= score_2015, "Improved", "Declined"),
+    state_name = fct_reorder(state_name, score_2023)
+  )
+dbDisconnect(plot_connection, shutdown = TRUE)
+
+ggplot(state_plot_data, aes(y = state_name)) +
+  geom_segment(
+    aes(x = score_2015, xend = score_2023, yend = state_name, color = direction),
+    arrow = arrow(type = "closed", length = unit(0.12, "inches")),
+    linewidth = 0.7
+  ) +
+  geom_point(aes(x = score_2015), color = "gray60", size = 1.8) +
+  scale_color_manual(values = c("Declined" = "#d95f02", "Improved" = "#1b9e77")) +
+  labs(
+    title = "State Reading Scores: 2015 to 2023",
+    subtitle = "States sorted by their 2023 reading score",
+    x = "Reading score",
+    y = NULL,
+    color = "Direction",
+    caption = "Gray dots mark 2015 scores; arrows point to 2023 scores."
+  )
+```
